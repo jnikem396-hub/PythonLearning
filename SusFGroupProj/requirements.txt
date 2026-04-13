@@ -2,7 +2,3 @@ pandas
 streamlit
 numpy
 plotly
-pathlib
-base64
-random
-time
