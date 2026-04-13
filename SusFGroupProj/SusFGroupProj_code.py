@@ -631,6 +631,43 @@ def p_sd(w, s1, s2, rho):
     return np.sqrt(w**2*s1**2 + (1-w)**2*s2**2 + 2*rho*w*(1-w)*s1*s2)
 def p_esg(w, e1, e2): return w*e1 + (1-w)*e2
 
+def portfolio_utility(x1, x2, r1, r2, s1, s2, rho, rf, e1, e2, gamma, delta, esg_rf=0.5):
+    excess = x1*(r1-rf) + x2*(r2-rf)
+    esg_tilt = x1*(e1-esg_rf) + x2*(e2-esg_rf)
+    variance = (x1**2)*(s1**2) + (x2**2)*(s2**2) + 2*rho*x1*x2*s1*s2
+    return excess + delta*esg_tilt - 0.5*gamma*variance
+
+def solve_constrained_optimum(r1, r2, s1, s2, rho, rf, e1, e2, gamma, delta, grid_size=400):
+    best = None
+    best_u = -np.inf
+
+    for i in range(grid_size + 1):
+        x1 = i / grid_size
+        max_x2 = grid_size - i
+        for j in range(max_x2 + 1):
+            x2 = j / grid_size
+            utility = portfolio_utility(x1, x2, r1, r2, s1, s2, rho, rf, e1, e2, gamma, delta)
+            if utility > best_u:
+                best_u = utility
+                best = (x1, x2)
+
+    x1, x2 = best
+    w_rf = max(0.0, 1 - x1 - x2)
+    ret = rf + x1*(r1-rf) + x2*(r2-rf)
+    sd = np.sqrt((x1**2)*(s1**2) + (x2**2)*(s2**2) + 2*rho*x1*x2*s1*s2)
+    esg = w_rf*0.5 + x1*e1 + x2*e2
+    return {
+        "wRf": w_rf,
+        "w1": x1,
+        "w2": x2,
+        "ret": ret,
+        "sd": sd,
+        "esg": esg,
+        "utility": best_u,
+        "risky_share": x1 + x2,
+        "binding_low_esg": False,
+    }
+
 def compute_results(a1, a2, rho, r_free, gamma, delta):
     R1,R2  = a1["ret"]/100, a2["ret"]/100
     S1,S2  = a1["sd"]/100,  a2["sd"]/100
@@ -651,17 +688,23 @@ def compute_results(a1, a2, rho, r_free, gamma, delta):
             best_sharpe = sharpe; idx_tan = i
 
     tan   = frontier[idx_tan]
-    y_std = (tan["ret"]-RF)/(gamma*tan["sd"]**2) if tan["sd"]>0 else 0
-    y_esg = ((tan["ret"]-RF) + delta*(tan["esg"]-ESG_RF))/(gamma*tan["sd"]**2) if tan["sd"]>0 else 0
-    y_std = max(0.0, min(1.0, y_std))
-    y_esg = max(0.0, min(1.0, y_esg))
+    std = solve_constrained_optimum(R1, R2, S1, S2, rho, RF, E1, E2, gamma, 0.0)
+    opt = solve_constrained_optimum(R1, R2, S1, S2, rho, RF, E1, E2, gamma, delta)
 
-    opt = {"wRf":1-y_esg, "w1":y_esg*tan["w"], "w2":y_esg*(1-tan["w"]),
-           "ret":RF+y_esg*(tan["ret"]-RF), "sd":y_esg*tan["sd"],
-           "esg":y_esg*tan["esg"]+(1-y_esg)*ESG_RF}
-    std = {"wRf":1-y_std, "w1":y_std*tan["w"], "w2":y_std*(1-tan["w"]),
-           "ret":RF+y_std*(tan["ret"]-RF), "sd":y_std*tan["sd"],
-           "esg":y_std*tan["esg"]+(1-y_std)*ESG_RF}
+    high_esg_is_a1 = E1 >= E2
+    low_weight = opt["w2"] if high_esg_is_a1 else opt["w1"]
+    corner_weight = opt["w1"] if high_esg_is_a1 else opt["w2"]
+    corner_utility = portfolio_utility(
+        1.0 if high_esg_is_a1 else 0.0,
+        0.0 if high_esg_is_a1 else 1.0,
+        R1, R2, S1, S2, rho, RF, E1, E2, gamma, delta, ESG_RF
+    )
+    interior_utility = portfolio_utility(
+        tan["w"],
+        1 - tan["w"],
+        R1, R2, S1, S2, rho, RF, E1, E2, gamma, delta, ESG_RF
+    )
+    opt["binding_low_esg"] = low_weight <= (1 / 400)
 
     pts         = frontier[::3]
     frontier_sd = [round(p["sd"]*100,2) for p in pts]
@@ -681,6 +724,16 @@ def compute_results(a1, a2, rho, r_free, gamma, delta):
             "cml_sd":cml_sd,"cml_ret":cml_ret,
             "esg_x":esg_x,"sharpe_vals":sharpe_vals,
             "tan":tan,"opt":opt,"std":std,"RF":RF,
+            "diagnostics":{
+                "high_esg_asset": a1.get("name","Asset 1") if high_esg_is_a1 else a2.get("name","Asset 2"),
+                "low_esg_asset": a2.get("name","Asset 2") if high_esg_is_a1 else a1.get("name","Asset 1"),
+                "high_esg_corner_weight": corner_weight,
+                "low_esg_weight": low_weight,
+                "binding_low_esg_constraint": opt["binding_low_esg"],
+                "corner_utility": corner_utility,
+                "interior_utility": interior_utility,
+                "corner_beats_interior": corner_utility > interior_utility,
+            },
             "a1_name":a1.get("name","Asset 1"),"a2_name":a2.get("name","Asset 2")}
 
 PLOTLY_COLORS = {
